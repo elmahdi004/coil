@@ -1,0 +1,5 @@
+# The obligatory greeting.
+print "Hello, Coil!";
+
+let name = "world";
+print "hello, " + name;

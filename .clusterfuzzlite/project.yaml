@@ -1,0 +1,9 @@
+language: c
+fuzz_targets:
+  - lexer_fuzzer
+  - source_fuzzer
+  - bytecode_fuzzer
+  - json_fuzzer
+sanitizers:
+  - address
+  - undefined

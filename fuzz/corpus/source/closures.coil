@@ -1,0 +1,19 @@
+fn make_adder(n) {
+    fn adder(x) { return x + n; }
+    return adder;
+}
+let add5 = make_adder(5);
+let add10 = make_adder(10);
+print add5(1);
+print add10(1);
+
+fn outer() {
+    let a = 1;
+    let b = 2;
+    fn middle() {
+        fn inner() { return a + b; }
+        return inner;
+    }
+    return middle();
+}
+print outer()();

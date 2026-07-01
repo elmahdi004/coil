@@ -1,0 +1,16 @@
+# Count word frequencies with a hash table.
+let text = "the quick brown fox the lazy dog the fox";
+let words = split(text, " ");
+
+let counts = {};
+for (let i = 0; i < len(words); i = i + 1) {
+    let w = words[i];
+    if (has(counts, w)) { counts[w] = counts[w] + 1; }
+    else { counts[w] = 1; }
+}
+
+let ks = keys(counts);
+sort(ks);
+for (let i = 0; i < len(ks); i = i + 1) {
+    print ks[i] + ": " + str(counts[ks[i]]);
+}

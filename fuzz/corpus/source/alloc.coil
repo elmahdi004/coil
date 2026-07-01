@@ -1,0 +1,18 @@
+let total = 0;
+for (let i = 0; i < 50; i = i + 1) {
+    let a = [i, i + 1, i + 2];
+    let s = "" + "x";
+    total = total + a[0] + a[1] + a[2];
+}
+print total;
+
+fn build(n) {
+    let arr = [0];
+    let k = 0;
+    while (k < n) {
+        arr[0] = arr[0] + k;
+        k = k + 1;
+    }
+    return arr[0];
+}
+print build(20);

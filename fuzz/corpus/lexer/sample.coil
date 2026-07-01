@@ -1,0 +1,12 @@
+let n = 10;
+fn fib(k) {
+    if (k < 2) { return k; }
+    return fib(k - 1) + fib(k - 2);
+}
+
+let names = ["ada", "alan", "grace"];
+let scores = { "ada": 99.5, "alan": 87, "grace": 100 };
+
+for (let i = 0; i < n; i = i + 1) {
+    print fib(i);   # comment
+}
