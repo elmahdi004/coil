@@ -11,6 +11,7 @@
 #include "natives.h"
 #include "object.h"
 #include "json.h"
+#include "stats.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -897,6 +898,163 @@ static bool n_hex(Heap *h, int argc, Value *args, Value *result)
 }
 
 /* ------------------------------------------------------------------ */
+/* statistics -- thin wrappers over stats.{h,c} on numeric arrays           */
+
+/* Copy a non-empty numeric array into a fresh double buffer (caller frees).
+ * Returns NULL if the value is not an array, is empty, or holds a non-number. */
+static double *nums_of(Value v, size_t *n_out)
+{
+    if (!IS_ARRAY(v)) return NULL;
+    ObjArray *a = AS_ARRAY(v);
+    size_t n = a->items.count;
+    if (n == 0) return NULL;
+    double *xs = (double *)malloc(n * sizeof(double));
+    if (!xs) return NULL;
+    for (size_t i = 0; i < n; i++) {
+        if (!IS_NUM(a->items.values[i])) { free(xs); return NULL; }
+        xs[i] = value_as_double(a->items.values[i]);
+    }
+    *n_out = n;
+    return xs;
+}
+
+/* build a Coil array from a double buffer.  No object is allocated inside the
+ * loop (floats are inline values), so the fresh array cannot be collected mid-
+ * build and needs no extra rooting. */
+static Value array_of_doubles(Heap *h, const double *xs, size_t n)
+{
+    ObjArray *arr = array_new(h);
+    for (size_t i = 0; i < n; i++)
+        valuearray_push(&arr->items, FLOAT_VAL(xs[i]));
+    return OBJ_VAL(arr);
+}
+
+#define STAT_SCALAR(name, call)                                             \
+    static bool name(Heap *h, int argc, Value *args, Value *result)         \
+    {                                                                       \
+        (void)h; (void)argc;                                                \
+        size_t n; double *xs = nums_of(args[0], &n);                        \
+        if (!xs) return false;                                              \
+        double r = (call);                                                  \
+        free(xs);                                                           \
+        *result = FLOAT_VAL(r);                                             \
+        return true;                                                        \
+    }
+
+STAT_SCALAR(n_mean,     stats_mean(xs, n))
+STAT_SCALAR(n_median,   stats_median(xs, n))
+STAT_SCALAR(n_mode,     stats_mode(xs, n))
+STAT_SCALAR(n_pvariance, stats_variance(xs, n, false))
+STAT_SCALAR(n_pstdev,   stats_stddev(xs, n, false))
+STAT_SCALAR(n_skew,     stats_skewness(xs, n))
+STAT_SCALAR(n_product,  stats_product(xs, n))
+
+/* sample variance/stddev need at least two points */
+static bool n_variance(Heap *h, int argc, Value *args, Value *result)
+{
+    (void)h; (void)argc;
+    size_t n; double *xs = nums_of(args[0], &n);
+    if (!xs) return false;
+    if (n < 2) { free(xs); return false; }
+    *result = FLOAT_VAL(stats_variance(xs, n, true));
+    free(xs);
+    return true;
+}
+
+static bool n_stdev(Heap *h, int argc, Value *args, Value *result)
+{
+    (void)h; (void)argc;
+    size_t n; double *xs = nums_of(args[0], &n);
+    if (!xs) return false;
+    if (n < 2) { free(xs); return false; }
+    *result = FLOAT_VAL(stats_stddev(xs, n, true));
+    free(xs);
+    return true;
+}
+
+static bool n_percentile(Heap *h, int argc, Value *args, Value *result)
+{
+    (void)h; (void)argc;
+    if (!IS_NUM(args[1])) return false;
+    size_t n; double *xs = nums_of(args[0], &n);
+    if (!xs) return false;
+    *result = FLOAT_VAL(stats_percentile(xs, n, value_as_double(args[1])));
+    free(xs);
+    return true;
+}
+
+/* two equal-length numeric arrays -> one scalar */
+static double *pair_of(Value a, Value b, size_t *n_out)
+{
+    size_t na, nb;
+    double *xs = nums_of(a, &na);
+    if (!xs) return NULL;
+    double *ys = nums_of(b, &nb);
+    if (!ys || na != nb) { free(xs); free(ys); return NULL; }
+    /* pack xs then ys into one buffer so a single free suffices */
+    double *both = (double *)malloc(2 * na * sizeof(double));
+    if (!both) { free(xs); free(ys); return NULL; }
+    for (size_t i = 0; i < na; i++) { both[i] = xs[i]; both[na + i] = ys[i]; }
+    free(xs); free(ys);
+    *n_out = na;
+    return both;
+}
+
+static bool n_correlation(Heap *h, int argc, Value *args, Value *result)
+{
+    (void)h; (void)argc;
+    size_t n; double *both = pair_of(args[0], args[1], &n);
+    if (!both || n < 2) { free(both); return false; }
+    *result = FLOAT_VAL(stats_correlation(both, both + n, n));
+    free(both);
+    return true;
+}
+
+static bool n_covariance(Heap *h, int argc, Value *args, Value *result)
+{
+    (void)h; (void)argc;
+    size_t n; double *both = pair_of(args[0], args[1], &n);
+    if (!both) return false;
+    *result = FLOAT_VAL(stats_covariance(both, both + n, n));
+    free(both);
+    return true;
+}
+
+static bool n_linfit(Heap *h, int argc, Value *args, Value *result)
+{
+    (void)argc;
+    size_t n; double *both = pair_of(args[0], args[1], &n);
+    if (!both || n < 2) { free(both); return false; }
+    double slope, intercept;
+    stats_linfit(both, both + n, n, &slope, &intercept);
+    free(both);
+    ObjArray *arr = array_new(h);
+    valuearray_push(&arr->items, FLOAT_VAL(slope));
+    valuearray_push(&arr->items, FLOAT_VAL(intercept));
+    *result = OBJ_VAL(arr);
+    return true;
+}
+
+/* numeric array -> transformed numeric array */
+#define STAT_MAP(name, fn)                                                  \
+    static bool name(Heap *h, int argc, Value *args, Value *result)         \
+    {                                                                       \
+        (void)argc;                                                         \
+        size_t n; double *xs = nums_of(args[0], &n);                        \
+        if (!xs) return false;                                              \
+        double *out = (double *)malloc(n * sizeof(double));                 \
+        if (!out) { free(xs); return false; }                               \
+        fn(xs, n, out);                                                     \
+        *result = array_of_doubles(h, out, n);                             \
+        free(xs); free(out);                                                \
+        return true;                                                        \
+    }
+
+STAT_MAP(n_cumsum,    stats_cumsum)
+STAT_MAP(n_zscore,    stats_zscore)
+STAT_MAP(n_normalize, stats_normalize)
+
+/* ------------------------------------------------------------------ */
 void register_natives(VM *vm)
 {
     vm_define_native(vm, "clock",  n_clock,  0);
@@ -982,4 +1140,22 @@ void register_natives(VM *vm)
     vm_define_native(vm, "char_at",     n_char_at,     2);
     vm_define_native(vm, "hex",         n_hex,         1);
     vm_define_native(vm, "tabulate",    n_tabulate,    1);
+
+    /* statistics */
+    vm_define_native(vm, "mean",        n_mean,        1);
+    vm_define_native(vm, "median",      n_median,      1);
+    vm_define_native(vm, "mode",        n_mode,        1);
+    vm_define_native(vm, "variance",    n_variance,    1);
+    vm_define_native(vm, "pvariance",   n_pvariance,   1);
+    vm_define_native(vm, "stdev",       n_stdev,       1);
+    vm_define_native(vm, "pstdev",      n_pstdev,      1);
+    vm_define_native(vm, "skew",        n_skew,        1);
+    vm_define_native(vm, "product",     n_product,     1);
+    vm_define_native(vm, "percentile",  n_percentile,  2);
+    vm_define_native(vm, "correlation", n_correlation, 2);
+    vm_define_native(vm, "covariance",  n_covariance,  2);
+    vm_define_native(vm, "linfit",      n_linfit,      2);
+    vm_define_native(vm, "cumsum",      n_cumsum,      1);
+    vm_define_native(vm, "zscore",      n_zscore,      1);
+    vm_define_native(vm, "normalize",   n_normalize,   1);
 }
