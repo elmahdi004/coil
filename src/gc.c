@@ -84,6 +84,10 @@ static void blacken(Heap *h, Obj *obj)
         }
         break;
     }
+    case OBJ_SLICE:
+        /* a slice is a lightweight view: it copies no elements and owns no
+         * storage of its own, so it contributes nothing to trace here. */
+        break;
     }
 }
 

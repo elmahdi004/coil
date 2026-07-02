@@ -68,7 +68,32 @@ int main(void)
         "assert(char_at(\"hello\", 1) == \"e\"); assert(char_at(\"hello\", 0) == \"h\");"
         "assert(hex(255) == \"ff\"); assert(hex(0) == \"0\"); assert(hex(16) == \"10\");")) { puts("FAIL nat3.str"); return 1; }
 
+    /* view: a zero-copy window over a parent array (parent kept alive here) */
+    if (!run(
+        "let base = [10, 20, 30, 40, 50];"
+        "let w = view(base, 1, 3);"
+        "assert(len(w) == 3);"
+        "assert(w[0] == 20); assert(w[1] == 30); assert(w[2] == 40);"
+        "assert(type(w) == \"view\");"
+        "let e = view(base, 5, 0); assert(len(e) == 0);"
+        "let f = view(base, 0, 5); assert(f[4] == 50);")) { puts("FAIL nat3.view"); return 1; }
+    if (!errs("print view([1, 2], 1, 5);"))  { puts("FAIL nat3.err.view.oob"); return 1; }
+    if (!errs("print view([1, 2], -1, 1);")) { puts("FAIL nat3.err.view.neg"); return 1; }
+
+    /* tabulate: [index, label] pairs */
+    if (!run(
+        "let t = tabulate([\"a\", \"b\", \"c\"]);"
+        "assert(len(t) == 3);"
+        "assert(t[0][0] == 0); assert(t[0][1] == \"a\");"
+        "assert(t[1][0] == 1); assert(t[1][1] == \"b\");"
+        "assert(t[2][0] == 2); assert(t[2][1] == \"c\");"
+        "let u = tabulate([10, 20]);"
+        "assert(u[0][0] == 0); assert(u[0][1] == \"10\");"
+        "assert(u[1][0] == 1); assert(u[1][1] == \"20\");"
+        "assert(len(tabulate([])) == 0);")) { puts("FAIL nat3.tabulate"); return 1; }
+
     /* error paths return cleanly */
+    if (!errs("print tabulate(5);"))        { puts("FAIL nat3.err.tabulate"); return 1; }
     if (!errs("print gcd(1.5, 2);"))        { puts("FAIL nat3.err.gcd"); return 1; }
     if (!errs("print char_at(\"hi\", 5);"))  { puts("FAIL nat3.err.charat"); return 1; }
     if (!errs("let a = [1]; insert(a, 9, 0);")) { puts("FAIL nat3.err.insert"); return 1; }

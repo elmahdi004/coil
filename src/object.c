@@ -127,6 +127,15 @@ ObjNative *native_new(Heap *h, NativeFn fn, int arity)
     return n;
 }
 
+ObjSlice *slice_new(Heap *h, ObjArray *parent, size_t start, size_t len)
+{
+    ObjSlice *s = ALLOC_OBJ(h, ObjSlice, OBJ_SLICE);
+    s->parent = parent;
+    s->start  = start;
+    s->len    = len;
+    return s;
+}
+
 void value_print(Value v)
 {
     switch (v.type) {
@@ -151,6 +160,7 @@ void value_print(Value v)
         }
         case OBJ_UPVALUE:  printf("<upvalue>"); break;
         case OBJ_NATIVE:   printf("<native fn>"); break;
+        case OBJ_SLICE:    printf("[view %zu]", AS_SLICE(v)->len); break;
         }
         break;
     }
@@ -194,6 +204,11 @@ void obj_free(Heap *h, Obj *obj)
         break;
     case OBJ_NATIVE:
         FREE(h, ObjNative, obj);
+        break;
+    case OBJ_SLICE:
+        /* the parent array is a shared reference owned by the heap, not by the
+         * slice, so only the view header itself is released here. */
+        FREE(h, ObjSlice, obj);
         break;
     }
 }

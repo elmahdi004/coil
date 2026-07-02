@@ -211,15 +211,14 @@ static int pass2(ObjFunction *f, const uint8_t *boundary)
             goto next;
         }
         case OP_LOOP: {
-            /* Backward edge.  Unlike a forward jump, the target was already
-             * reached and decoded earlier in this linear pass, so its boundary
-             * and entry height are settled; re-confirm the destination is an
-             * in-range instruction boundary within the height bound and close
-             * the loop. */
             uint16_t o = (uint16_t)((code[off + 1] << 8) | code[off + 2]);
             size_t target = off + 3 - (size_t)o;
-            if (target >= n || !boundary[target]) FAIL();
-            if (h < 0 || h > MAX_FRAME_STACK) FAIL();
+            /* A backward edge is a control-flow merge just like a forward jump:
+             * the height arriving from the loop's tail must equal the height
+             * already inferred at the target.  SUCC re-checks the boundary and
+             * range and enforces that equality, rejecting any loop whose body
+             * has a non-zero net stack effect. */
+            SUCC(target, h);
             goto next;
         }
         default: FAIL();

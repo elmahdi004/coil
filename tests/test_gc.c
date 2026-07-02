@@ -70,6 +70,37 @@ int main(void)
         "for (let i = 0; i < 200; i = i + 1) { push(words, upper(\"tag\" + str(i))); }"
         "assert(words[100] == \"TAG100\");")) { puts("FAIL gc.strings"); return 1; }
 
+    /* tabulate builds an array of freshly allocated sub-objects; run it under
+     * the collector to check the aggregate survives collection intact. */
+    if (!run(
+        "let t = tabulate([\"x\", \"y\", \"z\"]);"
+        "assert(len(t) == 3);"
+        "assert(t[0][0] == 0); assert(t[0][1] == \"x\");"
+        "assert(t[2][1] == \"z\");")) { puts("FAIL gc.tabulate"); return 1; }
+
+    /* map/filter run a callback that allocates; the result they accumulate must
+     * survive a collection triggered inside those callbacks. Under
+     * -DCOIL_GC_STRESS the allocation in `tag` collects on every call. */
+    if (!run(
+        "fn tag(x) { return str(x) + \"=\" + str(x * x); }"
+        "let m = map([1, 2, 3, 4, 5], tag);"
+        "assert(len(m) == 5);"
+        "assert(m[0] == \"1=1\"); assert(m[4] == \"5=25\");"
+        "fn big(x) { return len(str(x)) > 0; }"
+        "let f = filter([10, 20, 30], big);"
+        "assert(len(f) == 3); assert(f[2] == 30);")) { puts("FAIL gc.hof"); return 1; }
+
+    /* a view's parent array must survive collection as long as the view is
+     * reachable, even when nothing else references the parent.  Here the parent
+     * (range(12)) is reachable only through the view, so a collection between
+     * creating the view and reading it must not reclaim it. */
+    if (!run(
+        "let w = view(range(12), 2, 5);"   /* parent reachable only via w */
+        "let s = str(99);"                 /* allocations that may collect */
+        "let t = [1, 2, 3];"
+        "assert(len(w) == 5);"
+        "assert(w[0] == 2); assert(w[4] == 6);")) { puts("FAIL gc.view"); return 1; }
+
     puts("PASS test_gc");
     return 0;
 }

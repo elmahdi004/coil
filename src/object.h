@@ -17,7 +17,8 @@ typedef enum {
     OBJ_FUNCTION,
     OBJ_CLOSURE,
     OBJ_UPVALUE,
-    OBJ_NATIVE
+    OBJ_NATIVE,
+    OBJ_SLICE
 } ObjType;
 
 struct Obj {
@@ -85,6 +86,14 @@ typedef struct {
     int      arity;
 } ObjNative;
 
+/* A slice is a zero-copy window over a contiguous run of an array's elements. */
+typedef struct {
+    Obj        obj;
+    ObjArray  *parent;    /* the array this views into */
+    size_t     start;     /* index of the first element within parent */
+    size_t     len;       /* number of elements in the view */
+} ObjSlice;
+
 #define OBJ_TYPE(v)     (AS_OBJ(v)->type)
 #define AS_STRING(v)    ((ObjString *)AS_OBJ(v))
 #define AS_CSTRING(v)   (((ObjString *)AS_OBJ(v))->chars)
@@ -93,6 +102,7 @@ typedef struct {
 #define AS_FUNCTION(v)  ((ObjFunction *)AS_OBJ(v))
 #define AS_CLOSURE(v)   ((ObjClosure *)AS_OBJ(v))
 #define AS_NATIVE(v)    ((ObjNative *)AS_OBJ(v))
+#define AS_SLICE(v)     ((ObjSlice *)AS_OBJ(v))
 
 static inline bool is_obj_type(Value v, ObjType t)
 {
@@ -105,6 +115,7 @@ static inline bool is_obj_type(Value v, ObjType t)
 #define IS_FUNCTION(v)  is_obj_type(v, OBJ_FUNCTION)
 #define IS_CLOSURE(v)   is_obj_type(v, OBJ_CLOSURE)
 #define IS_NATIVE(v)    is_obj_type(v, OBJ_NATIVE)
+#define IS_SLICE(v)     is_obj_type(v, OBJ_SLICE)
 
 uint32_t hash_string(const char *key, size_t length);
 
@@ -126,6 +137,7 @@ void  vtable_free(ObjTable *t);
 ObjClosure  *closure_new(Heap *h, ObjFunction *fn);
 ObjUpvalue  *upvalue_new(Heap *h, Value *slot);
 ObjNative   *native_new(Heap *h, NativeFn fn, int arity);
+ObjSlice    *slice_new(Heap *h, ObjArray *parent, size_t start, size_t len);
 
 void obj_free(Heap *h, Obj *obj);   /* free one object's storage */
 

@@ -48,6 +48,7 @@ static const char *type_name(Value v)
         case OBJ_FUNCTION:
         case OBJ_CLOSURE:
         case OBJ_NATIVE:   return "function";
+        case OBJ_SLICE:    return "view";
         default:           return "object";
         }
     }
@@ -183,6 +184,7 @@ static bool n_len(Heap *h, int argc, Value *args, Value *result)
     if (IS_ARRAY(v))       *result = INT_VAL((int64_t)AS_ARRAY(v)->items.count);
     else if (IS_STRING(v)) *result = INT_VAL((int64_t)AS_STRING(v)->length);
     else if (IS_TABLE(v))  *result = INT_VAL((int64_t)AS_TABLE(v)->live);
+    else if (IS_SLICE(v))  *result = INT_VAL((int64_t)AS_SLICE(v)->len);
     else return false;
     return true;
 }
@@ -259,6 +261,24 @@ static bool n_range(Heap *h, int argc, Value *args, Value *result)
     for (int64_t i = 0; i < n; i++)
         valuearray_push(&arr->items, INT_VAL(i));
     *result = OBJ_VAL(arr);
+    return true;
+}
+
+/* view(array, start, len) -> a zero-copy window over array[start .. start+len).
+ * Unlike slice() (which copies), a view reads through to the parent array, so
+ * it stays valid only while the parent does. */
+static bool n_view(Heap *h, int argc, Value *args, Value *result)
+{
+    (void)argc;
+    if (!IS_ARRAY(args[0]) || !IS_INT(args[1]) || !IS_INT(args[2])) return false;
+    ObjArray *arr   = AS_ARRAY(args[0]);
+    int64_t   start = AS_INT(args[1]);
+    int64_t   len   = AS_INT(args[2]);
+    if (start < 0 || len < 0) return false;
+    /* compare without overflow: start <= count and len <= count - start */
+    if ((uint64_t)start > arr->items.count) return false;
+    if ((uint64_t)len > arr->items.count - (uint64_t)start) return false;
+    *result = OBJ_VAL(slice_new(h, arr, (size_t)start, (size_t)len));
     return true;
 }
 
@@ -485,6 +505,48 @@ static bool n_join(Heap *h, int argc, Value *args, Value *result)
     free(buf);
     h->gc_paused = saved;
     *result = OBJ_VAL(res);
+    return true;
+}
+
+/* Build a printable label for a value.  It allocates a scratch string, so it
+ * guards that allocation against a collection the way split()/join() do.
+ * Several of the reporting/debug natives call this while the collector is
+ * already running, so it re-enables collection on the way out. */
+static ObjString *cell_label(Heap *h, Value v)
+{
+    /* to_string may allocate a scratch string; pause the collector across that
+     * allocation so the fresh string can't be reclaimed before we hand it back,
+     * then restore the caller's collection state. */
+    bool saved = h->gc_paused;
+    h->gc_paused = true;
+    ObjString *s = to_string(h, v);
+    h->gc_paused = saved;
+    return s;
+}
+
+/* tabulate(array) -> array of [index, label] pairs.
+ *   tabulate(["a", "b"]) == [[0, "a"], [1, "b"]]
+ * Enumerates an array, pairing each element with its position and a printable
+ * label.  Allocates strings and sub-arrays while building, so it guards the
+ * whole build against a collection. */
+static bool n_tabulate(Heap *h, int argc, Value *args, Value *result)
+{
+    (void)argc;
+    if (!IS_ARRAY(args[0])) return false;
+    ObjArray *src = AS_ARRAY(args[0]);
+
+    bool saved = h->gc_paused;
+    h->gc_paused = true;                       /* guard the whole build */
+    ObjArray *out = array_new(h);              /* held only in this C local */
+    for (size_t i = 0; i < src->items.count; i++) {
+        ObjString *label = cell_label(h, src->items.values[i]);
+        ObjArray *pair = array_new(h);         /* may collect here */
+        valuearray_push(&pair->items, INT_VAL((int64_t)i));
+        valuearray_push(&pair->items, OBJ_VAL(label));
+        valuearray_push(&out->items, OBJ_VAL(pair));
+    }
+    h->gc_paused = saved;
+    *result = OBJ_VAL(out);
     return true;
 }
 
@@ -857,6 +919,7 @@ void register_natives(VM *vm)
     vm_define_native(vm, "has",    n_has,    2);
     vm_define_native(vm, "del",    n_del,    2);
     vm_define_native(vm, "range",  n_range,  1);
+    vm_define_native(vm, "view",   n_view,   3);
     vm_define_native(vm, "ord",    n_ord,    1);
     vm_define_native(vm, "chr",    n_chr,    1);
     vm_define_native(vm, "upper",  n_upper,  1);
@@ -918,4 +981,5 @@ void register_natives(VM *vm)
     vm_define_native(vm, "pad_right",   n_pad_right,   3);
     vm_define_native(vm, "char_at",     n_char_at,     2);
     vm_define_native(vm, "hex",         n_hex,         1);
+    vm_define_native(vm, "tabulate",    n_tabulate,    1);
 }

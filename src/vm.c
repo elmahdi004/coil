@@ -41,6 +41,11 @@ static void runtime_error(VM *vm, const char *fmt, ...)
     reset_stack(vm);
 }
 
+/* higher-order library natives (defined below run(), which they re-enter) */
+static bool n_map(Heap *h, int argc, Value *args, Value *result);
+static bool n_filter(Heap *h, int argc, Value *args, Value *result);
+static bool n_each(Heap *h, int argc, Value *args, Value *result);
+
 void vm_define_native(VM *vm, const char *name, NativeFn fn, int arity)
 {
     ObjString *s = string_copy(&vm->heap, name, strlen(name));
@@ -60,6 +65,10 @@ void vm_init(VM *vm)
     reset_stack(vm);
     table_init(&vm->globals);
     register_natives(vm);
+    /* higher-order helpers: run a user callback per element */
+    vm_define_native(vm, "map",    n_map,    2);
+    vm_define_native(vm, "filter", n_filter, 2);
+    vm_define_native(vm, "each",   n_each,   2);
 }
 
 void vm_free(VM *vm)
@@ -171,7 +180,11 @@ static void concatenate(VM *vm)
 }
 
 /* ------------------------------------------------------------------ */
-static InterpretResult run(VM *vm)
+/* Execute frames until the one that was on top when we were entered returns.
+ * `base_frame` is the frame_count to stop at: 0 drives a whole program to
+ * completion; a positive value lets a native re-enter the VM for a single
+ * callback and hand control back once that callback's frame has returned. */
+static InterpretResult run(VM *vm, int base_frame)
 {
     CallFrame *frame = &vm->frames[vm->frame_count - 1];
 #ifdef COIL_FUZZ
@@ -393,6 +406,8 @@ static InterpretResult run(VM *vm)
             }
             vm->sp = frame->slots;
             push(vm, result);
+            if (vm->frame_count == base_frame)
+                return INTERPRET_OK;  /* handed back to a re-entrant caller */
             frame = &vm->frames[vm->frame_count - 1];
             break;
         }
@@ -439,6 +454,12 @@ static InterpretResult run(VM *vm)
                 if (!value_hashable(index)) { runtime_error(vm, "invalid table key"); return INTERPRET_RUNTIME_ERROR; }
                 Value out;
                 push(vm, vtable_get(AS_TABLE(cont), index, &out) ? out : NIL_VAL);
+            } else if (IS_SLICE(cont)) {
+                if (!IS_INT(index)) { runtime_error(vm, "slice index must be an integer"); return INTERPRET_RUNTIME_ERROR; }
+                ObjSlice *sl = AS_SLICE(cont);
+                int64_t   i  = AS_INT(index);
+                if (i < 0 || (size_t)i >= sl->len) { runtime_error(vm, "slice index out of bounds"); return INTERPRET_RUNTIME_ERROR; }
+                push(vm, sl->parent->items.values[sl->start + (size_t)i]);
             } else {
                 runtime_error(vm, "can only index arrays and tables");
                 return INTERPRET_RUNTIME_ERROR;
@@ -471,6 +492,7 @@ static InterpretResult run(VM *vm)
             if (IS_ARRAY(v))       push(vm, INT_VAL((int64_t)AS_ARRAY(v)->items.count));
             else if (IS_STRING(v)) push(vm, INT_VAL((int64_t)AS_STRING(v)->length));
             else if (IS_TABLE(v))  push(vm, INT_VAL((int64_t)AS_TABLE(v)->live));
+            else if (IS_SLICE(v))  push(vm, INT_VAL((int64_t)AS_SLICE(v)->len));
             else { runtime_error(vm, "len expects an array, string, or table"); return INTERPRET_RUNTIME_ERROR; }
             break;
         }
@@ -490,6 +512,95 @@ static InterpretResult run(VM *vm)
 #undef NUM_BINOP
 }
 
+/* ------------------------------------------------------------------ */
+/* Higher-order natives.
+ *
+ * These call a Coil callback once per element by re-entering the interpreter.
+ * The callback is arbitrary user code: it can allocate freely, so a garbage
+ * collection may run at any point during it. */
+
+/* Invoke `fn` with a single argument and return its result in *out. */
+static bool vm_call1(VM *vm, Value fn, Value arg, Value *out)
+{
+    int base = vm->frame_count;
+    push(vm, fn);                                   /* callee below its args */
+    push(vm, arg);
+    if (!call_value(vm, fn, 1))
+        return false;
+    if (vm->frame_count == base) {                  /* a native ran inline */
+        *out = pop(vm);
+        return true;
+    }
+    if (run(vm, base) != INTERPRET_OK)              /* drive the closure body */
+        return false;
+    *out = pop(vm);
+    return true;
+}
+
+/* Apply `fn` to each element of `src`, collecting into `out`: in map mode the
+ * result of each call, in filter mode the elements whose call was truthy. */
+static bool hof_collect(VM *vm, Value fn, ObjArray *src, bool filtering, ObjArray *out)
+{
+    /* Root the in-progress result on the operand stack: a callback can run a
+     * collection, and `out` is otherwise reachable only from this C frame. */
+    push(vm, OBJ_VAL(out));
+    for (size_t i = 0; i < src->items.count; i++) {
+        Value elem = src->items.values[i];
+        Value r;
+        if (!vm_call1(vm, fn, elem, &r)) {
+            pop(vm);
+            return false;
+        }
+        if (filtering) {
+            if (value_truthy(r))
+                valuearray_push(&out->items, elem);
+        } else {
+            valuearray_push(&out->items, r);
+        }
+    }
+    pop(vm);
+    return true;
+}
+
+static bool n_map(Heap *h, int argc, Value *args, Value *result)
+{
+    (void)argc;
+    if (!IS_ARRAY(args[0]) || !IS_CLOSURE(args[1])) return false;
+    VM *vm = h->vm;
+    ObjArray *out = array_new(h);
+    if (!hof_collect(vm, args[1], AS_ARRAY(args[0]), false, out))
+        return false;
+    *result = OBJ_VAL(out);
+    return true;
+}
+
+static bool n_filter(Heap *h, int argc, Value *args, Value *result)
+{
+    (void)argc;
+    if (!IS_ARRAY(args[0]) || !IS_CLOSURE(args[1])) return false;
+    VM *vm = h->vm;
+    ObjArray *out = array_new(h);
+    if (!hof_collect(vm, args[1], AS_ARRAY(args[0]), true, out))
+        return false;
+    *result = OBJ_VAL(out);
+    return true;
+}
+
+static bool n_each(Heap *h, int argc, Value *args, Value *result)
+{
+    (void)argc;
+    if (!IS_ARRAY(args[0]) || !IS_CLOSURE(args[1])) return false;
+    VM *vm = h->vm;
+    ObjArray *src = AS_ARRAY(args[0]);
+    for (size_t i = 0; i < src->items.count; i++) {
+        Value r;
+        if (!vm_call1(vm, args[1], src->items.values[i], &r))
+            return false;
+    }
+    *result = NIL_VAL;
+    return true;
+}
+
 InterpretResult vm_run_function(VM *vm, ObjFunction *fn)
 {
     push(vm, OBJ_VAL(fn));
@@ -498,7 +609,7 @@ InterpretResult vm_run_function(VM *vm, ObjFunction *fn)
     push(vm, OBJ_VAL(closure));
     if (!call(vm, closure, 0))
         return INTERPRET_RUNTIME_ERROR;
-    return run(vm);
+    return run(vm, 0);
 }
 
 InterpretResult vm_interpret(VM *vm, const char *source, size_t len)
